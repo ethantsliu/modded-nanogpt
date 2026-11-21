@@ -25,7 +25,9 @@ fresh bf16 tensor the caller may overwrite); no host sync, so it captures in the
 pre-pass is anvil_cascade's own text, compiled the same way. This module imports neither Triton nor optim/anvil.py
 at import time (the CPU tests and the bench's CPU smoke run it through RefOps).
 
-Provenance: by @ethantsliu.
+Provenance: implementation by @ethantsliu. The Gram-space evaluation is the "Fast Polynomial Iteration for
+Rectangular Matrices" of the Polar Express paper's appendix (https://arxiv.org/abs/2505.16932), which restarts from
+X every three maps; the groups here are restarts every two or three.
 """
 import torch
 from torch import Tensor
