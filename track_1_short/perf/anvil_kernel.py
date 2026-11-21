@@ -27,7 +27,9 @@ at import time (the CPU tests and the bench's CPU smoke run it through RefOps).
 
 Provenance: implementation by @ethantsliu. The Gram-space evaluation is the "Fast Polynomial Iteration for
 Rectangular Matrices" of the Polar Express paper's appendix (https://arxiv.org/abs/2505.16932), which restarts from
-X every three maps; the groups here are restarts every two or three.
+X every three maps; the groups here are restarts every two or three. The same method with a restart after two
+iterations and symmetric GEMM kernels is Gram Newton-Schulz (Zhang, Amsel, Chen, Dao, 2026:
+https://tridao.me/blog/2026/gram-newton-schulz/), which this code was written without knowledge of.
 """
 import torch
 from torch import Tensor
