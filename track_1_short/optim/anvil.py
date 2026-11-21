@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 from torch import Tensor, nn
 
+from track_1_short.perf import anvil_kernel
 from track_1_short.perf.bank_scalars import BankScalarStaging
 from track_1_short.perf.kernels.polar_express import XTX, XXT, ba_plus_cAA
 from track_1_short.perf.kernels.transpose import transpose_add, transpose_copy
@@ -787,11 +788,16 @@ class AnvilAndAdam:
 def anvil_bank_update(bank: AnvilBank):
     """One bank's ANVIL update, from its reduce-scattered gradient (the body the optimizer-tail graphs capture)."""
     # 1. Twin-rail Nesterov momentum + ANVIL whitening cascade
-    v_chunk = anvil_cascade(
-        bank.grad, bank.velocity, bank.momentum,
-        split_baddbmm=bank.split_baddbmm,
-        fast_beta_t=bank.fast_beta, fast_weight_t=bank.fast_weight,
-    )
+    if anvil_kernel.applies(bank.label):
+        # Off in the record configuration: ANVIL_KERNEL (the same cascade evaluated in Gram space) or
+        # ANVIL_ABLATE (measurement only: no cascade) for the banks in ANVIL_BANKS.
+        v_chunk = anvil_kernel.bank_cascade(bank, ANVIL_MAPS, RAIL_SLOW_BETA, FROBENIUS_MARGIN, FROBENIUS_EPS)
+    else:
+        v_chunk = anvil_cascade(
+            bank.grad, bank.velocity, bank.momentum,
+            split_baddbmm=bank.split_baddbmm,
+            fast_beta_t=bank.fast_beta, fast_weight_t=bank.fast_weight,
+        )
     # 2. Equalize per-lane update energy
     v_chunk = AnvilAndAdam._rail_equalizer(v_chunk, bank.lane_energy, bank.beta2, bank.red_dim)
     # 3. Update the parameter in place, with weight decay gated on the slow rail's sign. eff_lr is per

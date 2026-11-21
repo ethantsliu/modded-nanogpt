@@ -1,6 +1,8 @@
 """Run configuration: hyperparameters and the training-stage table.
 
-The run's own environment variables (DATA_PATH, NUM_SCHEDULED_ITERATIONS, TRAIN_SEED) are read here.
+The run's own environment variables (DATA_PATH, NUM_SCHEDULED_ITERATIONS, TRAIN_SEED, the run-metric knobs
+RUN_METRICS / VAL_CURVE and the optimizer-kernel knobs ANVIL_KERNEL / ANVIL_ABLATE / ANVIL_BANKS at the bottom)
+are read here.
 The others: torchrun's RANK / LOCAL_RANK / WORLD_SIZE (distributed.py; train_gpt.py also reads
 LOCAL_RANK), PYTORCH_ALLOC_CONF (set by train_gpt.py), and CUDA_HOME (perf/kernels/cross_entropy.py,
 for the CE kernel's CUDA headers).
@@ -89,3 +91,62 @@ TRAINING_STAGES = [
 ]
 assert VIRTUAL_SEQ_CAP % BLOCK_SIZE == 0
 assert any(s.train_max_seq_len > VIRTUAL_SEQ_CAP for s in TRAINING_STAGES), "VIRTUAL_SEQ_CAP would be inert"
+
+
+# -----------------------------------------------------------------------------
+# Run-metric knobs (track_1_short/run_metrics.py). Both off by default, and
+# neither changes a compiled graph, a kernel or the training state.
+# RUN_METRICS=1: `METRIC ...` lines after the timed loop: per-step latency (one host perf_counter per step,
+# no synchronize), peak GPU memory of every rank over the timed loop (the peak counters are reset right
+# before the clock starts, so the legacy "peak memory allocated" line then covers the timed loop only),
+# and each validation's loss to 6 digits. Meant to be on in both arms of a timing A/B.
+# VAL_CURVE=N: also validate every N steps (N > 0, not at step 0), with the clock stopped exactly as for the
+# final validation. A curve run, not a timing run: each validation leaves its reads, pulls and gathers on
+# the clock (see val_loss_every above), so every val line is tagged INVALID_FOR_RECORD(val_curve).
+RUN_METRICS = os.environ.get("RUN_METRICS", "0") == "1"
+VAL_CURVE = int(os.environ.get("VAL_CURVE", "0"))
+assert os.environ.get("RUN_METRICS", "0") in ("0", "1"), f"RUN_METRICS={os.environ['RUN_METRICS']!r}: use 0 or 1"
+assert VAL_CURVE >= 0, f"VAL_CURVE={VAL_CURVE}: use 0 (off) or a step interval"
+
+# -----------------------------------------------------------------------------
+# Optimizer-kernel experiment knobs (perf/anvil_kernel.py). All off by default: the record's
+# anvil_cascade then runs untouched (optim/anvil.py tests one module constant per bank update, on the host).
+# ANVIL_KERNEL: an alternative implementation of the whitening cascade with the SAME update rule (the six ANVIL_MAPS
+# after the Frobenius normalization); only the floating-point evaluation order differs. Each name is (map groups,
+# symmetric small products): the maps of one group are composed in the small Gram space (one Gram and one large
+# GEMM per group instead of one of each per map); the "s" names compute the small products with the half-work
+# symmetric Triton kernel (perf/kernels/anvil_chain.py) instead of cuBLAS baddbmm.
+ANVIL_KERNELS = {
+    "gram222": ((2, 2, 2), False),
+    "gram222s": ((2, 2, 2), True),
+    "gram33": ((3, 3), False),
+    "gram33s": ((3, 3), True),
+}
+ANVIL_BANK_LABELS = ("qk_bank", "vo_bank", "mlp_bank")
+
+
+def _anvil_flag(name: str, allowed) -> str:
+    value = os.environ.get(name, "").strip().lower()
+    value = "" if value in ("0", "off", "none") else value
+    assert value == "" or value in allowed, f"{name}={value!r}: use one of {sorted(allowed)} (or unset)"
+    return value
+
+
+def _anvil_banks(value: str, default: tuple[str, ...]) -> frozenset[str]:
+    labels = frozenset(p.strip() for p in value.split(",") if p.strip()) or frozenset(default)
+    assert labels <= set(ANVIL_BANK_LABELS), f"ANVIL_BANKS: unknown banks {sorted(labels - set(ANVIL_BANK_LABELS))}"
+    return labels
+
+
+ANVIL_KERNEL = _anvil_flag("ANVIL_KERNEL", ANVIL_KERNELS)
+# ANVIL_ABLATE=skip_matrix: MEASUREMENT ONLY, NOT A VALID TRAINING RUN. The cascade's Grams, polynomials and update
+# GEMMs are skipped (the update is the Frobenius-normalized momentum: the cascade with zero maps); the rails, the
+# equalizer, the decay/update and all comms stay. Its step time against the record's is the latency the cascade's
+# matrix work exposes; its loss means nothing, and its val lines are tagged INVALID_FOR_RECORD(anvil_ablate).
+ANVIL_ABLATE = _anvil_flag("ANVIL_ABLATE", ("skip_matrix",))
+assert not (ANVIL_KERNEL and ANVIL_ABLATE), "ANVIL_KERNEL and ANVIL_ABLATE are separate arms: set one"
+# ANVIL_BANKS: comma list of the banks the kernel / ablation applies to. Default: mlp_bank for ANVIL_KERNEL (the
+# only bank whose matrices are tall enough for the Gram-space composition to cut work: 2816x768, against vo's
+# 768x768 and qk's 256x768), every bank for ANVIL_ABLATE.
+ANVIL_BANKS = (_anvil_banks(os.environ.get("ANVIL_BANKS", ""), ANVIL_BANK_LABELS if ANVIL_ABLATE else ("mlp_bank",))
+               if ANVIL_KERNEL or ANVIL_ABLATE else frozenset())

@@ -32,9 +32,13 @@ from torch import nn
 # torch._inductor.config.coordinate_descent_tuning = True # we have banned this flag for new records because it causes compilation to take 30min
 from track_1_short.canonical_mask import BackgroundCanonicalMask
 from track_1_short.config import (
+    ANVIL_ABLATE,
+    ANVIL_KERNEL,
     LR_COOLDOWN_FRAC,
+    RUN_METRICS,
     SPLIT_EMBED_STAGE,
     TRAINING_STAGES,
+    VAL_CURVE,
     WS_POST_YARN_EXT,
     Hyperparameters,
 )
@@ -49,6 +53,7 @@ from track_1_short.ngram_table import (
     is_update_step,
     ngram_row_ids,
 )
+from track_1_short.perf import anvil_kernel
 from track_1_short.perf.cuda_graphs.baked_addresses import assert_addresses_unchanged, baked_addresses
 from track_1_short.perf.cuda_graphs.capture_plan import plan_warmup, step_graph_key
 from track_1_short.perf.cuda_graphs.fp8_refresh_graphs import Fp8RefreshGraphs
@@ -59,6 +64,7 @@ from track_1_short.perf.kernels.mlp import prime_stage_cache
 from track_1_short.perf.pinned_batches import PinnedBatchStaging
 from track_1_short.perf.row_prefetch import PrefetchStaging, RowPrefetch
 from track_1_short.perf.value_embed_pull import ValueEmbedPull
+from track_1_short.run_metrics import peak_mem_lines, run_config_line, step_latency_lines, val_line
 from track_1_short.sampled_softmax import SampledSoftmax
 from track_1_short.schedule import TrainingSchedule
 from track_1_short.tail_average import TailAverages
@@ -70,6 +76,11 @@ from track_1_short.training import TrainingManager
 dynamo.config.recompile_limit = 64
 # Step lines in the timed loop (console and log): every Nth step, plus the last two (record #360).
 PRINT_EVERY = 25
+# Runs whose timings are not record timings carry a machine-readable tag on every val line (empty in the record
+# configuration). VAL_CURVE=N (config.py): intermediate validations leave their reads, pulls and gathers on the
+# clock. ANVIL_ABLATE (measurement only): the whitening cascade is skipped, so the run is not a training run.
+TIMING_TAG = ((" INVALID_FOR_RECORD(val_curve)" if VAL_CURVE else "")
+              + (" INVALID_FOR_RECORD(anvil_ablate)" if ANVIL_ABLATE else ""))
 
 
 def train_step(training_manager, step_graphs, row_prefetch, sampled_softmax, batches, deferred_gathers,
@@ -164,6 +175,11 @@ def main():
         f"seed={'random' if args.train_seed is None else args.train_seed} "
         f"steps={training_schedule.total_steps} stage boundaries={training_schedule.boundaries}"
     )
+    if RUN_METRICS or VAL_CURVE:
+        print0(run_config_line(RUN_METRICS, VAL_CURVE, args.train_seed, env.world_size, training_schedule.total_steps),
+               console=True)
+    if ANVIL_KERNEL or ANVIL_ABLATE:  # both unset in the record configuration
+        print0(anvil_kernel.describe(), console=True)
     model.cast_matrix_weights_bf16()
     for param in model.parameters():
         dist.broadcast(param.detach(), 0)
@@ -305,6 +321,14 @@ def main():
     # completes the tables first (model/attention.py Yarn; record #360). Warmup rebuilt them whole.
     uncompiled_model.limit_yarn_rebuild(max_step_tokens)
 
+    # RUN_METRICS=1 (config.py; all None / unused otherwise): the end-of-step clock readings, the steps that
+    # began with a validation, and the peak-memory counters split at the clock start.
+    step_clock = [0.0] * training_schedule.total_steps if RUN_METRICS else None
+    validated_steps = []
+    if RUN_METRICS:
+        warmup_peak = (torch.cuda.max_memory_allocated(), torch.cuda.max_memory_reserved())
+        torch.cuda.reset_peak_memory_stats()
+
     training_time_ms = 0
     # start the clock
     torch.cuda.synchronize()
@@ -323,7 +347,8 @@ def main():
         last_step = (step == training_schedule.total_steps)
         training_manager.advance_schedule(step)
         # --------------- VALIDATION SECTION -----------------
-        if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
+        if (last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0)
+                or (VAL_CURVE > 0 and step > 0 and step % VAL_CURVE == 0)):
             # The deferred gathers land first: validation reads the banks and, at the last step, ships
             # into them.
             if last_step:
@@ -368,7 +393,11 @@ def main():
             val_loss /= val_steps
             del val_batches, val_pulls
             dist.reduce(val_loss, 0, op=dist.ReduceOp.AVG)
-            print0(f"step:{step}/{training_schedule.total_steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/max(step, 1):.2f}ms", console=True)
+            print0(f"step:{step}/{training_schedule.total_steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/max(step, 1):.2f}ms"
+                   + TIMING_TAG, console=True)
+            if RUN_METRICS or VAL_CURVE:  # the clock is stopped
+                print0(val_line(step, training_schedule.total_steps, training_time_ms, float(val_loss)), console=True)
+                validated_steps.append(step)
             # The clock is stopped: flush the log and collect the loop's garbage here.
             flush_log()
             gc.collect()
@@ -390,6 +419,8 @@ def main():
         train_step(training_manager, step_graphs, row_prefetch, sampled_softmax, batches, deferred_gathers,
                    step, uncompiled_model.lm_head_f8_col, prefetch_next=step + 1 < training_schedule.total_steps)
         tail_averages.tick(step)
+        if step_clock is not None:  # RUN_METRICS=1: a host clock reading, no synchronize
+            step_clock[step] = training_time_ms + 1000 * (time.perf_counter() - t0)
 
         # logging, thinned to every PRINT_EVERY steps and the last two
         if (step + 1) % PRINT_EVERY == 0 or step + 1 >= training_schedule.total_steps - 1:
@@ -397,6 +428,16 @@ def main():
             print0(f"step:{step+1}/{training_schedule.total_steps} train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms/(step + 1):.2f}ms", console=True)
 
     gc.enable()
+    if RUN_METRICS:
+        # After the timed loop (the final validation has synchronized): step latency, then every rank's peaks.
+        for line in step_latency_lines(step_clock, validated_steps, training_schedule.boundaries):
+            print0(line, console=True)
+        timed_peak = (torch.cuda.max_memory_allocated(), torch.cuda.max_memory_reserved())
+        peaks = torch.zeros(env.world_size, 4, dtype=torch.int64, device=env.device)
+        peaks[env.rank] = torch.tensor(timed_peak + warmup_peak, dtype=torch.int64, device=env.device)
+        dist.all_reduce(peaks)
+        for line in peak_mem_lines(peaks.tolist()):
+            print0(line, console=True)
     if args.run_evals:
         model.eval()
         from evals import hellaswag
