@@ -24,6 +24,8 @@ Invariants: same inputs and outputs as anvil_cascade (reads bank.grad, updates b
 fresh bf16 tensor the caller may overwrite); no host sync, so it captures in the optimizer CUDA graphs; the rails
 pre-pass is anvil_cascade's own text, compiled the same way. This module imports neither Triton nor optim/anvil.py
 at import time (the CPU tests and the bench's CPU smoke run it through RefOps).
+
+Provenance: by @ethantsliu.
 """
 import torch
 from torch import Tensor

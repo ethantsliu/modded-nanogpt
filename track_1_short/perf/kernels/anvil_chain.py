@@ -11,8 +11,9 @@ Invariants: S and B are square, symmetric and commute (they are not checked); C 
 diagonal block the two triangles are separate dot products (equal in exact arithmetic, a rounding apart in bf16).
 
 Off the record path: nothing imports this module unless ANVIL_KERNEL names an "s" kernel (config.py).
-Never compiled or run when written (no GPU, no Triton on the authoring machine): anvil-kernel/bench.py and
-test_optim_kernel.py check it against baddbmm on the node.
+anvil-kernel/bench.py and test_optim_kernel.py check it against baddbmm on a GPU.
+
+Provenance: kernel by @ethantsliu, adapted from ba_plus_cAA_kernel (polar_express.py, by @byronxu99).
 """
 import torch
 import triton
