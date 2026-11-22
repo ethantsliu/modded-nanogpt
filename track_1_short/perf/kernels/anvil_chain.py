@@ -13,7 +13,8 @@ diagonal block the two triangles are separate dot products (equal in exact arith
 Off the record path: nothing imports this module unless ANVIL_KERNEL names an "s" kernel (config.py).
 anvil-kernel/bench.py and test_optim_kernel.py check it against baddbmm on a GPU.
 
-Provenance: kernel by @ethantsliu, adapted from ba_plus_cAA_kernel (polar_express.py, by @byronxu99).
+Provenance: by @ethantsliu, adapted from ba_plus_cAA_kernel (polar_express.py, by @byronxu99). The same operation
+exists in Quack's CuTeDSL gemm_symmetric, used by Gram Newton-Schulz; this is a small Triton port of it.
 """
 import torch
 import triton
