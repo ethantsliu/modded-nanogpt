@@ -37,6 +37,7 @@ from track_1_short.config import (
     LR_COOLDOWN_FRAC,
     RUN_METRICS,
     SPLIT_EMBED_STAGE,
+    TRAIN_LOSS_EVERY,
     TRAINING_STAGES,
     VAL_CURVE,
     WS_POST_YARN_EXT,
@@ -64,7 +65,7 @@ from track_1_short.perf.kernels.mlp import prime_stage_cache
 from track_1_short.perf.pinned_batches import PinnedBatchStaging
 from track_1_short.perf.row_prefetch import PrefetchStaging, RowPrefetch
 from track_1_short.perf.value_embed_pull import ValueEmbedPull
-from track_1_short.run_metrics import peak_mem_lines, run_config_line, step_latency_lines, val_line
+from track_1_short.run_metrics import clock_split_line, peak_mem_lines, run_config_line, step_latency_lines, val_line
 from track_1_short.sampled_softmax import SampledSoftmax
 from track_1_short.schedule import TrainingSchedule
 from track_1_short.tail_average import TailAverages
@@ -80,6 +81,7 @@ PRINT_EVERY = 25
 # configuration). VAL_CURVE=N (config.py): intermediate validations leave their reads, pulls and gathers on the
 # clock. ANVIL_ABLATE (measurement only): the whitening cascade is skipped, so the run is not a training run.
 TIMING_TAG = ((" INVALID_FOR_RECORD(val_curve)" if VAL_CURVE else "")
+              + (" INVALID_FOR_RECORD(train_loss)" if TRAIN_LOSS_EVERY else "")
               + (" INVALID_FOR_RECORD(anvil_ablate)" if ANVIL_ABLATE else ""))
 
 
@@ -419,6 +421,10 @@ def main():
         train_step(training_manager, step_graphs, row_prefetch, sampled_softmax, batches, deferred_gathers,
                    step, uncompiled_model.lm_head_f8_col, prefetch_next=step + 1 < training_schedule.total_steps)
         tail_averages.tick(step)
+        if TRAIN_LOSS_EVERY and step % TRAIN_LOSS_EVERY == 0:
+            # The forward graph's loss output still holds this step's value (no later replay yet). A host sync.
+            print0(f"METRIC train step={step} total={training_schedule.total_steps} "
+                   f"loss={step_graphs.current.loss.item():.6f} rank=0", console=True)
         if step_clock is not None:  # RUN_METRICS=1: a host clock reading, no synchronize
             step_clock[step] = training_time_ms + 1000 * (time.perf_counter() - t0)
 
@@ -432,6 +438,7 @@ def main():
         # After the timed loop (the final validation has synchronized): step latency, then every rank's peaks.
         for line in step_latency_lines(step_clock, validated_steps, training_schedule.boundaries):
             print0(line, console=True)
+        print0(clock_split_line(step_clock, training_time_ms), console=True)
         timed_peak = (torch.cuda.max_memory_allocated(), torch.cuda.max_memory_reserved())
         peaks = torch.zeros(env.world_size, 4, dtype=torch.int64, device=env.device)
         peaks[env.rank] = torch.tensor(timed_peak + warmup_peak, dtype=torch.int64, device=env.device)

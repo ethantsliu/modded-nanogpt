@@ -331,3 +331,28 @@ def test_gpu_bank_update_captures_in_a_cuda_graph(flag):
         torch.cuda.synchronize()
     assert all(bits_equal(t, eager[name]) for name, t in bank.mutated().items())
     assert not bits_equal(bank.p_slice, before["p_slice"])
+
+
+def test_gram_space_order_equals_the_record_order_in_float64():
+    """In exact arithmetic the Gram-space evaluation (pairs of maps composed on the Gram side) is the record's
+    cascade: checked in float64, where rounding is negligible, on a tall matrix with the real maps."""
+    torch.manual_seed(0)
+    X = torch.randn(96, 24, dtype=torch.float64)
+    X = X / (1.05 * torch.linalg.matrix_norm(X))
+    eye = torch.eye(24, dtype=torch.float64)
+    R = X.clone()
+    for a, b, c in MAPS:
+        A = R.mT @ R
+        R = R @ (a * eye + b * A + c * A @ A)
+    G = X.clone()
+    for g in range(3):
+        A = G.mT @ G
+        Q = None
+        for j in range(2):
+            a, b, c = MAPS[2 * g + j]
+            P = a * eye + b * A + c * A @ A
+            if j == 0:
+                A = P @ A @ P
+            Q = P if Q is None else Q @ P
+        G = G @ Q
+    assert torch.linalg.matrix_norm(G - R) / torch.linalg.matrix_norm(R) < 1e-12

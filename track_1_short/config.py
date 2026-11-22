@@ -33,7 +33,8 @@ class Hyperparameters:
     # validation is on the clock -- the val reads and n-gram pulls, the value_embeds gather, the drained
     # CUDA-graph run-ahead and the cycle re-land after it cost ~0.2-0.5 s over a run at 250).
     val_loss_every: int = 0
-    save_checkpoint: bool = False
+    # SAVE_CHECKPOINT=1 (off by default): save the model and optimizer state after the final validation.
+    save_checkpoint: bool = os.environ.get("SAVE_CHECKPOINT", "0") == "1"
     run_evals: bool = False  # run additional evaluations after training is completed
     # reproducibility: unset means a random init; any integer (0 included) seeds it
     train_seed: int | None = int(os.environ["TRAIN_SEED"]) if "TRAIN_SEED" in os.environ else None
@@ -107,6 +108,11 @@ RUN_METRICS = os.environ.get("RUN_METRICS", "0") == "1"
 VAL_CURVE = int(os.environ.get("VAL_CURVE", "0"))
 assert os.environ.get("RUN_METRICS", "0") in ("0", "1"), f"RUN_METRICS={os.environ['RUN_METRICS']!r}: use 0 or 1"
 assert VAL_CURVE >= 0, f"VAL_CURVE={VAL_CURVE}: use 0 (off) or a step interval"
+# TRAIN_LOSS_EVERY=N: every N steps, read rank 0's training loss (the objective the step optimized: sampled softmax
+# on most steps, plus the auxiliary terms) and print a METRIC train line. Each read is a host sync on the clock, so
+# this is a curve run, not a timing run: val lines are tagged INVALID_FOR_RECORD(train_loss).
+TRAIN_LOSS_EVERY = int(os.environ.get("TRAIN_LOSS_EVERY", "0"))
+assert TRAIN_LOSS_EVERY >= 0, f"TRAIN_LOSS_EVERY={TRAIN_LOSS_EVERY}: use 0 (off) or a step interval"
 
 # -----------------------------------------------------------------------------
 # Optimizer-kernel experiment knobs (perf/anvil_kernel.py). All off by default: the record's

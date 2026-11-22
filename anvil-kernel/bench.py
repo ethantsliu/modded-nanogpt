@@ -339,6 +339,8 @@ def main():
     ap.add_argument("--scale", type=int, help="divide every matrix dimension by this (1 = the real shapes)")
     ap.add_argument("--kernels", default=",".join(ANVIL_KERNELS))
     ap.add_argument("--banks", default=",".join(BANK_SHAPES))
+    ap.add_argument("--shapes", help="size sweep instead of the record's banks: comma list of NxROWSxCOLS (N matrices per rank), "
+                                     "e.g. 3x2816x768,1x16384x4096; each becomes a bank labelled sweep_NxROWSxCOLS")
     ap.add_argument("--spectrum", default="p05", choices=("gauss", "p05", "p1", "lowrank"))
     ap.add_argument("--no-graph", action="store_true", help="time eager calls instead of CUDA-graph replays")
     ap.add_argument("--json", help="also write every row to this file")
@@ -350,6 +352,12 @@ def main():
     scale = args.scale or (4 if args.smoke else 1)
     kernels = [k for k in args.kernels.split(",") if k]
     labels = [b for b in args.banks.split(",") if b]
+    if args.shapes:  # a size sweep: register each shape as its own bank (BANK_SHAPES holds the all-rank count)
+        labels = []
+        for spec in args.shapes.split(","):
+            n, rows, cols = (int(v) for v in spec.lower().split("x"))
+            BANK_SHAPES[f"sweep_{n}x{rows}x{cols}"] = (n * WORLD, rows, cols)
+            labels.append(f"sweep_{n}x{rows}x{cols}")
     assert all(k in ANVIL_KERNELS for k in kernels) and all(b in BANK_SHAPES for b in labels)
     timer = Timer(device, reps, warmup, graph=not args.no_graph)
     if not cuda:

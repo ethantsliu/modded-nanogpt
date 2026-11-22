@@ -58,6 +58,14 @@ def step_latency_lines(clock_ms: Sequence[float], validated_steps=(), boundaries
     return lines
 
 
+def clock_split_line(clock_ms: Sequence[float], total_ms: float) -> str:
+    """Where the clock goes outside the per-step latencies: step 0 (with the prefix-table build before it) and the
+    tail after the last training step's host reading (the device backlog, the final flush and the tail-average
+    ship, up to the synchronize that stops the clock). clock_ms[s] = training time at the end of step s."""
+    return (f"METRIC clock_split step0_ms={clock_ms[0]:.3f} loop_end_ms={clock_ms[-1]:.3f} "
+            f"tail_ms={total_ms - clock_ms[-1]:.3f} total_ms={total_ms:.3f} clock=host_nosync")
+
+
 def run_config_line(run_metrics: bool, val_curve: int, seed, world_size: int, total_steps: int) -> str:
     return (f"METRIC run_config timing={'curve_run' if val_curve else 'timing_run'} RUN_METRICS={int(run_metrics)} "
             f"VAL_CURVE={val_curve} seed={'random' if seed is None else seed} world_size={world_size} total_steps={total_steps}")
